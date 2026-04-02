@@ -1,0 +1,63 @@
+# Dependencies
+node_modules/
+npm-debug.log
+yarn-error.log
+pnpm-debug.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+build/
+.next/
+.vite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Sensitive files
+*.pem
+private_key.pem
+
+# Database
+*.db
+*.sqlite
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+/postgres_data
+
+# Testing
+coverage/
+.nyc_output/
+
+# Documentation (all markdown files ignored)
+*.md
+!node_modules/**/*.md
+!backend/node_modules/**/*.md
+
+# Cleanup and setup scripts
+cleanup.bat
+cleanup.py
+cleanup_all.py
+setup.bat
+setup.sh
+
+# Archived folders
+.archive/
+guidelines/

@@ -1,0 +1,73 @@
+version: '3.9'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: ichess-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-ichess}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ichess-network
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ichess-backend
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-ichess}
+      JWT_SECRET: ${JWT_SECRET:-change-this-in-production}
+      FRONTEND_URL: http://frontend:3000
+      APPLE_KEY_ID: ${APPLE_KEY_ID:-your-key-id}
+      APPLE_TEAM_ID: ${APPLE_TEAM_ID:-your-team-id}
+      APPLE_BUNDLE_ID: ${APPLE_BUNDLE_ID:-com.ichess.app}
+      APPLE_PRIVATE_KEY_PATH: ${APPLE_PRIVATE_KEY_PATH:-./private_key.pem}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/private_key.pem:/app/private_key.pem:ro
+    networks:
+      - ichess-network
+    command: npm run start
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ./Dockerfile
+    container_name: ichess-frontend
+    environment:
+      VITE_API_URL: http://backend:3000/api
+      VITE_APP_NAME: iChess Premium
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    networks:
+      - ichess-network
+
+volumes:
+  postgres_data:
+
+networks:
+  ichess-network:
+    driver: bridge
