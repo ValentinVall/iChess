@@ -1,50 +1,181 @@
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { useNavigate } from "react-router";
+import { useNavigate, useParams } from "react-router";
 import { Chess, Square } from "chess.js";
+import { ArrowLeft, Brain, Crown, RotateCcw, Swords, Trophy, UserRound, X } from "lucide-react";
 import { CustomChessboard } from "./CustomChessboard";
-import { apiClient } from "../../lib/api";
-import { ArrowLeft, RotateCcw, Trophy, X, Undo2 } from "lucide-react";
+import { BrandHomeLink } from "./BrandHomeLink";
+import { Slider } from "./ui/slider";
+import { apiClient, type ActiveGameState, type PlayerColor } from "../../lib/api";
+import { getSoundCueFromState, playSoundCue } from "../../lib/gameSounds";
+import { DEFAULT_STOCKFISH_LEVEL, getStockfishLevelMeta, stockfishLevels } from "../stockfishLevels";
+
+interface UserProfile {
+  id: number;
+  playerNumber: string | null;
+  username: string;
+  rating: number;
+  wins: number;
+  losses: number;
+  draws: number;
+}
 
 export function AIGame() {
+  const checkmateTimeoutRef = useRef<number | null>(null);
+  const previousMoveCountRef = useRef(0);
   const navigate = useNavigate();
+  const { gameId: routeGameId } = useParams();
   const [gameId, setGameId] = useState<string | null>(null);
   const [game, setGame] = useState(new Chess());
-  const [difficulty, setDifficulty] = useState(3);
+  const [selectedLevel, setSelectedLevel] = useState(DEFAULT_STOCKFISH_LEVEL);
+  const [activeLevel, setActiveLevel] = useState(DEFAULT_STOCKFISH_LEVEL);
   const [moveHistory, setMoveHistory] = useState<string[]>([]);
+  const [lastMoveSquares, setLastMoveSquares] = useState<string[]>([]);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [possibleMoves, setPossibleMoves] = useState<string[]>([]);
   const [gameOver, setGameOver] = useState(false);
   const [result, setResult] = useState<"win" | "loss" | "draw" | null>(null);
   const [isAIThinking, setIsAIThinking] = useState(false);
   const [promotionMove, setPromotionMove] = useState<{ from: string; to: string } | null>(null);
+  const [isResignConfirmOpen, setIsResignConfirmOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [isStartingGame, setIsStartingGame] = useState(false);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [selectedPlayerColor, setSelectedPlayerColor] = useState<PlayerColor>("white");
+  const [activePlayerColor, setActivePlayerColor] = useState<PlayerColor>("white");
+  const [isGameOverModalDismissed, setIsGameOverModalDismissed] = useState(false);
 
-  // Initialize game
+  const selectedMeta = getStockfishLevelMeta(selectedLevel);
+  const activeMeta = getStockfishLevelMeta(activeLevel);
+  const keyDifficultyStops = [
+    { level: 1, label: "Noob" },
+    { level: 5, label: "Amateur" },
+    { level: 10, label: "CM" },
+    { level: 13, label: "GM" },
+    { level: 15, label: "WC" },
+  ];
+  const hasActiveGame = Boolean(gameId);
+  const playerTurn = activePlayerColor === "white" ? "w" : "b";
+  const aiTurn = activePlayerColor === "white" ? "b" : "w";
+
   useEffect(() => {
-    const initGame = async () => {
+    const loadProfile = async () => {
       try {
-        const response = await apiClient.createGame(difficulty);
-        setGameId(response.gameId);
-      } catch (error) {
-        console.error('Failed to create game:', error);
-        // Continue with offline mode
+        const profileData = await apiClient.getProfile();
+        setProfile(profileData);
+      } catch (profileError) {
+        console.error("Failed to load player profile for AI game:", profileError);
       }
     };
-    initGame();
+
+    void loadProfile();
+
+    return () => {
+      if (checkmateTimeoutRef.current !== null) {
+        window.clearTimeout(checkmateTimeoutRef.current);
+      }
+    };
   }, []);
 
-  // Piece values for evaluation
+  useEffect(() => {
+    if (!routeGameId || routeGameId === gameId) {
+      return;
+    }
+
+    const resolvedRouteGameId = routeGameId;
+
+    let isDisposed = false;
+
+    async function loadExistingGame() {
+      try {
+        setIsStartingGame(true);
+        setError(null);
+
+        const [gameResponse, profileData] = await Promise.all([
+          apiClient.getGameState(resolvedRouteGameId),
+          profile ? Promise.resolve(profile) : apiClient.getProfile(),
+        ]);
+
+        if (isDisposed) {
+          return;
+        }
+
+        if (gameResponse.metadata.mode !== "ai") {
+          throw new Error("This game is not an AI match");
+        }
+
+        const nextProfile = {
+          id: Number(profileData.id),
+          playerNumber: profileData.playerNumber,
+          username: profileData.username,
+          rating: profileData.rating,
+          wins: profileData.wins,
+          losses: profileData.losses,
+          draws: profileData.draws,
+        };
+
+        setProfile(nextProfile);
+
+        const restoredPlayerColor = gameResponse.metadata.whitePlayerId === String(nextProfile.id) ? "white" : "black";
+        const restoredLevel = Number(gameResponse.metadata.difficulty) || DEFAULT_STOCKFISH_LEVEL;
+
+        clearPendingGameOver();
+        previousMoveCountRef.current = 0;
+        setSelectedLevel(restoredLevel);
+        setActiveLevel(restoredLevel);
+        setActivePlayerColor(restoredPlayerColor);
+        setGameId(gameResponse.metadata.id);
+        setIsAIThinking(false);
+        setPromotionMove(null);
+        setIsResignConfirmOpen(false);
+        setIsGameOverModalDismissed(false);
+        applyServerState(gameResponse.state);
+      } catch (loadError) {
+        if (!isDisposed) {
+          setError(loadError instanceof Error ? loadError.message : "Failed to restore AI game");
+          navigate("/ai-game", { replace: true });
+        }
+      } finally {
+        if (!isDisposed) {
+          setIsStartingGame(false);
+        }
+      }
+    }
+
+    void loadExistingGame();
+
+    return () => {
+      isDisposed = true;
+    };
+  }, [gameId, navigate, profile, routeGameId]);
+
+  function clearPendingGameOver() {
+    if (checkmateTimeoutRef.current !== null) {
+      window.clearTimeout(checkmateTimeoutRef.current);
+      checkmateTimeoutRef.current = null;
+    }
+  }
+
   const pieceValueMap: Record<string, number> = {
-    p: 1, n: 3, b: 3, r: 5, q: 9, k: 0,
-    P: 1, N: 3, B: 3, R: 5, Q: 9, K: 0
+    p: 1,
+    n: 3,
+    b: 3,
+    r: 5,
+    q: 9,
+    k: 0,
+    P: 1,
+    N: 3,
+    B: 3,
+    R: 5,
+    Q: 9,
+    K: 0,
   };
 
-  // Calculate material count (to evaluate position advantage)
   function calculateMaterial() {
     const board = game.board();
     let whiteScore = 0;
     let blackScore = 0;
-    
+
     board.forEach((row) => {
       row.forEach((piece) => {
         if (piece) {
@@ -57,419 +188,350 @@ export function AIGame() {
         }
       });
     });
-    
+
     return { white: whiteScore, black: blackScore };
   }
 
-  // Helper function to find king square
-  function findKingSquare(gameInstance: Chess, color: "w" | "b"): string | null {
+  function findKingSquare(gameInstance: Chess, color: "w" | "b") {
     const board = gameInstance.board();
-    
-    for (let i = 0; i < 8; i++) {
-      for (let j = 0; j < 8; j++) {
-        const piece = board[i][j];
+
+    for (let rankIndex = 0; rankIndex < 8; rankIndex += 1) {
+      for (let fileIndex = 0; fileIndex < 8; fileIndex += 1) {
+        const piece = board[rankIndex][fileIndex];
         if (piece && piece.type === "k" && piece.color === color) {
-          const file = String.fromCharCode(97 + j);
-          const rank = String(8 - i);
-          return file + rank;
+          const file = String.fromCharCode(97 + fileIndex);
+          const rank = String(8 - rankIndex);
+          return `${file}${rank}`;
         }
       }
     }
+
     return null;
   }
 
-  // AI Logic with different difficulty levels
-  function evaluatePosition(gameInstance: Chess, isMaximizing: boolean = true): number {
-    let score = 0;
-    const board = gameInstance.board();
-    
-    const pieceValues: Record<string, number> = {
-      p: 1, n: 3, b: 3, r: 5, q: 9, k: 0,
-      P: 1, N: 3, B: 3, R: 5, Q: 9, K: 0
-    };
-    
-    // Piece position bonuses (centralization)
-    const positionBonus: Record<number, Record<number, number>> = {
-      0: [0, 0, 0, 0, 0, 0, 0, 0],
-      1: [0, 0, -10, -10, -10, -10, 0, 0],
-      2: [-10, -5, 0, 5, 5, 0, -5, -10],
-      3: [-10, -5, 5, 10, 10, 5, -5, -10],
-      4: [-10, -5, 5, 10, 10, 5, -5, -10],
-      5: [-5, 0, 10, 15, 15, 10, 0, -5],
-      6: [-10, -5, 0, 5, 5, 0, -5, -10],
-      7: [0, 0, 0, 0, 0, 0, 0, 0]
-    };
-    
-    // Material evaluation with position bonuses
-    board.forEach((row, rank) => {
-      row.forEach((piece, file) => {
-        if (piece) {
-          const value = pieceValues[piece.type] || 0;
-          const posBonus = positionBonus[rank]?.[file] || 0;
-          const totalValue = value + (posBonus * 0.1);
-          
-          if (piece.color === "b") {
-            score += totalValue;
-          } else {
-            score -= totalValue;
-          }
-        }
-      });
-    });
-    
-    // Check control of center
-    const centerFiles = [3, 4];
-    const centerRanks = [3, 4];
-    for (let i = 0; i < 8; i++) {
-      for (let j = 0; j < 8; j++) {
-        const piece = board[i][j];
-        if (piece && centerFiles.includes(j) && centerRanks.includes(i)) {
-          if (piece.type !== "k") {
-            if (piece.color === "b") score += 0.5;
-            else score -= 0.5;
-          }
-        }
-      }
+  function getLastMoveSquaresFromPgn(pgn: string) {
+    if (!pgn.trim()) {
+      return [];
     }
-    
-    // King safety bonus (prefer castled king)
-    const whiteKing = findKingSquare(gameInstance, "w");
-    const blackKing = findKingSquare(gameInstance, "b");
-    
-    if (whiteKing && (whiteKing === "g1" || whiteKing === "c1")) score -= 2; // Castled
-    if (blackKing && (blackKing === "g8" || blackKing === "c8")) score += 2; // Castled
-    
-    return score;
-  }
 
-  function getAIMove(currentGame: Chess): string | null {
-    const moves = currentGame.moves({ verbose: true });
-    
-    if (moves.length === 0) return null;
-    
-    // Filter for different move types
-    const captureMoves = moves.filter(m => m.captured);
-    const checkMoves = moves.filter(m => {
-      const testGame = new Chess(currentGame.fen());
-      testGame.move(m.san);
-      return testGame.isCheck();
-    });
-    const checkmateMoves = moves.filter(m => {
-      const testGame = new Chess(currentGame.fen());
-      testGame.move(m.san);
-      return testGame.isCheckmate();
-    });
-    
-    // If checkmate is available, always take it
-    if (checkmateMoves.length > 0) {
-      return getBestMove(currentGame, checkmateMoves, 3);
-    }
-    
-    switch (difficulty) {
-      case 1:
-        // Pure blunder mode - random blunders
-        if (Math.random() < 0.3 && captureMoves.length > 0) {
-          return captureMoves[Math.floor(Math.random() * captureMoves.length)].san;
-        }
-        return moves[Math.floor(Math.random() * moves.length)].san;
-      
-      case 2:
-        // Beginner - mostly random but avoids terrible blunders
-        if (Math.random() < 0.1) {
-          return getBestMove(currentGame, moves.slice(0, 3), 0);
-        }
-        if (Math.random() < 0.3 && checkMoves.length > 0) {
-          return checkMoves[Math.floor(Math.random() * checkMoves.length)].san;
-        }
-        return moves[Math.floor(Math.random() * moves.length)].san;
-      
-      case 3:
-        // Intermediate - balanced
-        if (checkmateMoves.length > 0) {
-          return getBestMove(currentGame, checkmateMoves, 1);
-        }
-        if (Math.random() < 0.5 && checkMoves.length > 0) {
-          return getBestMove(currentGame, checkMoves.slice(0, 3), 1);
-        }
-        return getBestMove(currentGame, moves.slice(0, 5), 1);
-      
-      case 4:
-        // Skilled - mostly strategic
-        if (Math.random() < 0.1) {
-          return moves[Math.floor(Math.random() * moves.length)].san;
-        }
-        return getBestMove(currentGame, moves.slice(0, 10), 2);
-      
-      case 5:
-        // Master - optimal play
-        return getBestMove(currentGame, moves, 3);
-      
-      default:
-        return moves[Math.floor(Math.random() * moves.length)].san;
+    try {
+      const replayGame = new Chess();
+      replayGame.loadPgn(pgn);
+      const history = replayGame.history({ verbose: true });
+      const latestMove = history[history.length - 1];
+
+      return latestMove ? [latestMove.from, latestMove.to] : [];
+    } catch {
+      return [];
     }
   }
 
-  function getBestMove(currentGame: Chess, moves: any[], depth: number): string {
-    let bestMove = moves[0].san;
-    let bestScore = -Infinity;
-    
-    if (depth === 0) {
-      // Level 1-2: simple evaluation
-      for (const moveObj of moves) {
-        const testGame = new Chess(currentGame.fen());
-        testGame.move(moveObj.san);
-        
-        let score = evaluatePosition(testGame, false);
-        
-        // Checkmate bonus
-        if (testGame.isCheckmate()) score += 10000;
-        // Check bonus
-        if (testGame.isCheck()) score += 50;
-        // Capture bonus
-        if (moveObj.captured) score += pieceValueMap[moveObj.captured] * 2;
-        
-        if (score > bestScore) {
-          bestScore = score;
-          bestMove = moveObj.san;
-        }
+  function applyServerState(nextState: ActiveGameState) {
+    const nextGame = new Chess(nextState.fen);
+    const nextMoveCount = nextState.moveHistory?.length || 0;
+
+    if (nextMoveCount > previousMoveCountRef.current) {
+      const soundCue = getSoundCueFromState(nextState);
+      if (soundCue) {
+        playSoundCue(soundCue);
       }
+    }
+
+    previousMoveCountRef.current = nextMoveCount;
+
+    setGame(nextGame);
+    setMoveHistory(nextState.moveHistory || []);
+    setLastMoveSquares(getLastMoveSquaresFromPgn(nextState.pgn));
+    setSelectedSquare(null);
+    setPossibleMoves([]);
+
+    const finished = nextState.isCheckmate || nextState.isDraw || nextState.result !== undefined;
+    clearPendingGameOver();
+
+    if (nextState.isCheckmate) {
+      setGameOver(false);
+      checkmateTimeoutRef.current = window.setTimeout(() => {
+        setGameOver(true);
+        checkmateTimeoutRef.current = null;
+      }, 1000);
     } else {
-      // Level 3-5: minimax with lookahead
-      for (const moveObj of moves) {
-        const testGame = new Chess(currentGame.fen());
-        testGame.move(moveObj.san);
-        
-        let score: number;
-        if (testGame.isCheckmate()) {
-          score = 10000;
-        } else if (testGame.isDraw()) {
-          score = 0;
-        } else {
-          const nextMoves = testGame.moves({ verbose: true });
-          if (nextMoves.length === 0) {
-            score = evaluatePosition(testGame, false);
-          } else {
-            // Look ahead for opponent's best response
-            let worstScore = Infinity;
-            for (const opponentMove of nextMoves.slice(0, Math.min(5, nextMoves.length))) {
-              const opponentGame = new Chess(testGame.fen());
-              opponentGame.move(opponentMove.san);
-              const opponentScore = evaluatePosition(opponentGame, true);
-              worstScore = Math.min(worstScore, opponentScore);
-            }
-            score = evaluatePosition(testGame, false) + (worstScore * 0.5);
-          }
-        }
-        
-        if (score > bestScore) {
-          bestScore = score;
-          bestMove = moveObj.san;
-        }
-      }
+      setGameOver(finished);
     }
-    
-    return bestMove;
+
+    if (nextState.result === "white") {
+      setResult(activePlayerColor === "white" ? "win" : "loss");
+    } else if (nextState.result === "black") {
+      setResult(activePlayerColor === "black" ? "win" : "loss");
+    } else if (nextState.result === "draw" || nextState.isDraw) {
+      setResult("draw");
+    } else {
+      setResult(null);
+    }
+  }
+
+  async function startNewGame(level: number) {
+    try {
+      clearPendingGameOver();
+      setIsStartingGame(true);
+      setError(null);
+      setIsAIThinking(false);
+      setPromotionMove(null);
+      setIsResignConfirmOpen(false);
+      setSelectedSquare(null);
+      setPossibleMoves([]);
+      setLastMoveSquares([]);
+      setGameOver(false);
+      setResult(null);
+      setIsGameOverModalDismissed(false);
+      previousMoveCountRef.current = 0;
+
+      const response = await apiClient.createGame(level, selectedPlayerColor);
+      setSelectedLevel(level);
+      setActiveLevel(level);
+      setActivePlayerColor(selectedPlayerColor);
+      setGameId(response.game.id);
+      navigate(`/game/ai/${response.game.id}`, { replace: true });
+      applyServerState(response.state);
+
+      if (selectedPlayerColor === "black") {
+        setIsAIThinking(true);
+        const aiResponse = await apiClient.requestAIMove(response.game.id);
+        applyServerState({
+          fen: aiResponse.result.fen,
+          pgn: aiResponse.result.pgn,
+          turn: aiResponse.result.fen.split(" ")[1],
+          isCheck: aiResponse.result.isCheck,
+          isCheckmate: aiResponse.result.isCheckmate,
+          isDraw: aiResponse.result.isDraw,
+          result: aiResponse.result.result,
+          moveHistory: aiResponse.result.moveHistory,
+          moves: aiResponse.result.moves,
+          legalMoves: [],
+        });
+      }
+    } catch (createError) {
+      console.error("Failed to create game:", createError);
+      setError(createError instanceof Error ? createError.message : "Failed to start AI game");
+    } finally {
+      setIsAIThinking(false);
+      setIsStartingGame(false);
+    }
   }
 
   function handlePieceClick(square: string) {
+    if (!hasActiveGame || isAIThinking || gameOver || game.turn() !== playerTurn) {
+      return;
+    }
+
     const piece = game.get(square as Square);
-    
+
     if (selectedSquare === square) {
       setSelectedSquare(null);
       setPossibleMoves([]);
       return;
     }
-    
+
     if (piece && piece.color === game.turn()) {
       setSelectedSquare(square);
       const moves = game.moves({ square: square as Square, verbose: true });
-      setPossibleMoves(moves.map(m => m.to));
-    } else if (selectedSquare && possibleMoves.includes(square)) {
-      makeMove(selectedSquare, square);
+      setPossibleMoves(moves.map((move) => move.to));
+      return;
+    }
+
+    if (selectedSquare && possibleMoves.includes(square)) {
+      void makeMove(selectedSquare, square);
     }
   }
 
-  function makeMove(from: string, to: string, promotion?: string) {
+  async function makeMove(from: string, to: string, promotion?: string) {
     try {
+      if (!gameId || isAIThinking || gameOver) {
+        return;
+      }
+
       const gameCopy = new Chess(game.fen());
-      
-      // Check if this is a pawn promotion move
       const piece = gameCopy.get(from as Square);
-      const isPromotionMove = piece && piece.type === "p" && 
+      const isPromotionCandidate =
+        piece &&
+        piece.type === "p" &&
         ((piece.color === "w" && to[1] === "8") || (piece.color === "b" && to[1] === "1"));
-      
-      if (isPromotionMove && !promotion) {
-        // Show promotion dialog
+
+      if (isPromotionCandidate && !promotion) {
         setPromotionMove({ from, to });
         return;
       }
-      
-      const moveNotation = { from, to, promotion: promotion || "q" };
-      const result = gameCopy.move(moveNotation);
-      
-      if (result) {
-        setGame(gameCopy);
-        setMoveHistory([...moveHistory, result.san]);
-        setSelectedSquare(null);
-        setPossibleMoves([]);
-        setPromotionMove(null);
-        
-        // Check game end
-        if (gameCopy.isCheckmate()) {
-          setGameOver(true);
-          const gameResult = gameCopy.turn() === "w" ? "loss" : "win";
-          setResult(gameResult);
-          // Save game to backend
-          if (gameId) {
-            const apiResult = gameResult === "win" ? "white" : "black";
-            apiClient.finishGame(gameId, apiResult, gameCopy.pgn(), gameCopy.fen()).catch(err => console.error('Failed to save game:', err));
-          }
-          return;
-        }
-        
-        if (gameCopy.isDraw()) {
-          setGameOver(true);
-          setResult("draw");
-          // Save game to backend
-          if (gameId) {
-            apiClient.finishGame(gameId, "draw", gameCopy.pgn(), gameCopy.fen()).catch(err => console.error('Failed to save game:', err));
-          }
-          return;
-        }
-        
-        // AI move
-        setIsAIThinking(true);
-        setTimeout(() => {
-          const aiMove = getAIMove(gameCopy);
-          if (aiMove) {
-            const aiResult = gameCopy.move(aiMove);
-            setGame(new Chess(gameCopy.fen()));
-            setMoveHistory(prev => [...prev, aiResult.san]);
-            
-            if (gameCopy.isCheckmate()) {
-              setGameOver(true);
-              setResult("loss");
-              // Save game to backend
-              if (gameId) {
-                apiClient.finishGame(gameId, "black", gameCopy.pgn(), gameCopy.fen()).catch(err => console.error('Failed to save game:', err));
-              }
-            } else if (gameCopy.isDraw()) {
-              setGameOver(true);
-              setResult("draw");
-              // Save game to backend
-              if (gameId) {
-                apiClient.finishGame(gameId, "draw", gameCopy.pgn(), gameCopy.fen()).catch(err => console.error('Failed to save game:', err));
-              }
-            }
-          }
-          setIsAIThinking(false);
-        }, 800);
+
+      setError(null);
+      const moveResponse = await apiClient.makeGameMove(gameId, {
+        from,
+        to,
+        promotion: promotion || "q",
+      });
+
+      applyServerState({
+        fen: moveResponse.result.fen,
+        pgn: moveResponse.result.pgn,
+        turn: moveResponse.result.fen.split(" ")[1],
+        isCheck: moveResponse.result.isCheck,
+        isCheckmate: moveResponse.result.isCheckmate,
+        isDraw: moveResponse.result.isDraw,
+        result: moveResponse.result.result,
+        moveHistory: moveResponse.result.moveHistory,
+        moves: moveResponse.result.moves,
+        legalMoves: [],
+      });
+      setPromotionMove(null);
+
+      if (moveResponse.result.gameStatus === "completed") {
+        return;
       }
-    } catch (error) {
-      console.error("Move error:", error);
+
+      if (new Chess(moveResponse.result.fen).turn() === aiTurn) {
+        setIsAIThinking(true);
+        const aiResponse = await apiClient.requestAIMove(gameId);
+        applyServerState({
+          fen: aiResponse.result.fen,
+          pgn: aiResponse.result.pgn,
+          turn: aiResponse.result.fen.split(" ")[1],
+          isCheck: aiResponse.result.isCheck,
+          isCheckmate: aiResponse.result.isCheckmate,
+          isDraw: aiResponse.result.isDraw,
+          result: aiResponse.result.result,
+          moveHistory: aiResponse.result.moveHistory,
+          moves: aiResponse.result.moves,
+          legalMoves: [],
+        });
+      }
+    } catch (moveError) {
+      console.error("Move error:", moveError);
+      setError(moveError instanceof Error ? moveError.message : "Move failed");
+    } finally {
+      setIsAIThinking(false);
     }
   }
 
-  function onDrop(sourceSquare: string, targetSquare: string): boolean {
-    if (game.turn() !== "w") return false;
-    
-    try {
-      const testGame = new Chess(game.fen());
-      const result = testGame.move({ from: sourceSquare, to: targetSquare, promotion: "q" });
-      
-      if (result) {
-        makeMove(sourceSquare, targetSquare);
-        return true;
-      }
-    } catch (error) {
+  function onDrop(sourceSquare: string, targetSquare: string) {
+    if (!hasActiveGame || game.turn() !== playerTurn || isAIThinking || gameOver) {
       return false;
     }
-    
+
+    try {
+      const testGame = new Chess(game.fen());
+      const testMove = testGame.move({ from: sourceSquare, to: targetSquare, promotion: "q" });
+
+      if (testMove) {
+        void makeMove(sourceSquare, targetSquare);
+        return true;
+      }
+    } catch {
+      return false;
+    }
+
     return false;
   }
 
   function resetGame() {
-    setGame(new Chess());
-    setMoveHistory([]);
-    setSelectedSquare(null);
-    setPossibleMoves([]);
-    setGameOver(false);
-    setResult(null);
-    setIsAIThinking(false);
-    setPromotionMove(null);
+    clearPendingGameOver();
+    setIsResignConfirmOpen(false);
+    void startNewGame(selectedLevel);
   }
 
-  function undoLastMoves() {
-    if (moveHistory.length < 2) return;
-    
-    // Create a new game and replay all but the last 2 moves
-    const newGame = new Chess();
-    const newMoveHistory = moveHistory.slice(0, -2);
-    
-    for (const move of newMoveHistory) {
-      newGame.move(move);
+  async function resignCurrentGame() {
+    try {
+      if (!gameId || gameOver) {
+        return;
+      }
+
+      setIsResignConfirmOpen(false);
+      setError(null);
+      await apiClient.resignGame(gameId);
+      setGameOver(true);
+      setResult("loss");
+    } catch (resignError) {
+      setError(resignError instanceof Error ? resignError.message : "Failed to resign game");
     }
-    
-    setGame(newGame);
-    setMoveHistory(newMoveHistory);
-    setSelectedSquare(null);
-    setPossibleMoves([]);
   }
+
+  const currentProfile = profile ?? {
+    id: 0,
+    playerNumber: "#--",
+    username: "player",
+    rating: 800,
+    wins: 0,
+    losses: 0,
+    draws: 0,
+  };
+
+  const topPlayerCardClassName =
+    "flex items-center justify-between gap-3 rounded-[1.5rem] border border-black/10 bg-white/75 px-4 py-3 shadow-[0_18px_40px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-white/10 dark:bg-white/10";
+  const bottomPlayerCardClassName =
+    "flex items-center justify-between gap-3 rounded-[1.5rem] border border-black/10 bg-[#f5f5f5]/95 px-4 py-3 shadow-[0_18px_40px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-white/10 dark:bg-white/10";
 
   return (
     <div className="min-h-screen relative overflow-hidden">
-      {/* Background */}
       <div className="absolute inset-0 bg-gradient-to-br from-gray-50 via-gray-100 to-gray-50 dark:from-[#0a0a0a] dark:via-[#121212] dark:to-[#0a0a0a]" />
+      <div className="absolute left-1/2 top-24 h-[34rem] w-[34rem] -translate-x-1/2 rounded-full bg-black/5 blur-[150px] dark:bg-white/5" />
 
-      {/* Game Over Modal */}
       <AnimatePresence>
-        {gameOver && (
+        {gameOver && !isGameOverModalDismissed && (
           <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"
+            initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
+            animate={{ opacity: 1, backdropFilter: "blur(8px)" }}
+            exit={{ opacity: 0, backdropFilter: "blur(0px)" }}
+            transition={{ duration: 0.34, ease: [0.22, 1, 0.36, 1] }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/38 px-4"
           >
             <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-white dark:bg-[#1a1a1a] rounded-3xl p-8 max-w-md w-full mx-4 shadow-2xl"
+              initial={{ y: 28, scale: 0.965, opacity: 0, filter: "blur(10px)" }}
+              animate={{ y: 0, scale: 1, opacity: 1, filter: "blur(0px)" }}
+              exit={{ y: 18, scale: 0.985, opacity: 0, filter: "blur(6px)" }}
+              transition={{ duration: 0.48, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}
+              className="w-full max-w-md rounded-3xl border border-white/45 bg-white/96 p-8 shadow-[0_30px_80px_rgba(0,0,0,0.24)] backdrop-blur-xl dark:border-white/10 dark:bg-[#1a1a1a]/94"
             >
+              <button
+                onClick={() => setIsGameOverModalDismissed(true)}
+                className="absolute right-4 top-4 inline-flex h-10 w-10 items-center justify-center rounded-full border border-black/10 bg-white/80 text-black/65 transition-all hover:bg-white hover:text-black dark:border-white/10 dark:bg-white/10 dark:text-white/65 dark:hover:bg-white/15 dark:hover:text-white"
+                aria-label="Закрыть результат партии"
+              >
+                <X className="h-5 w-5" />
+              </button>
               <div className="text-center">
                 <motion.div
-                  animate={{ rotate: 360 }}
-                  transition={{ duration: 2 }}
-                  className="inline-block mb-4"
+                  initial={{ opacity: 0, scale: 0.85, y: 8 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  transition={{ duration: 0.42, delay: 0.18, ease: [0.22, 1, 0.36, 1] }}
+                  className="mb-4 inline-block"
                 >
-                  <Trophy className={`w-16 h-16 ${
-                    result === "win" ? "text-yellow-500" : result === "draw" ? "text-gray-500" : "text-red-500"
-                  }`} />
+                  <Trophy className={`h-16 w-16 ${result === "win" ? "text-yellow-500" : result === "draw" ? "text-gray-500" : "text-red-500"}`} />
                 </motion.div>
-                
-                <h2 className="text-3xl font-bold mb-2 text-black dark:text-white">
-                  {result === "win" ? "🎉 Вы победили!" : result === "draw" ? "🤝 Ничья!" : "😢 Вы проиграли"}
+
+                <h2 className="mb-2 text-3xl font-bold text-black dark:text-white">
+                  {result === "win" ? " You won!" : result === "draw" ? " It's a draw!" : " You lost"}
                 </h2>
-                
-                <p className="text-black/60 dark:text-white/60 mb-6">
-                  {result === "win" ? "Отличная игра! Вы одолели ботов." : result === "draw" ? "Хорошая игра! Обоим хватило навыков." : "Не отчаивайтесь! Попробуйте снова."}
+
+                <p className="mb-6 text-black/60 dark:text-white/60">
+                  {result === "win"
+                    ? "Great game. You defeated the AI at the selected level."
+                    : result === "draw"
+                    ? "Strong game. You held a draw against the AI."
+                    : "The AI was stronger in this game. Try another level and play again."}
                 </p>
-                
-                <div className="bg-black/5 dark:bg-white/5 rounded-2xl p-4 mb-6">
-                  <p className="text-sm text-black/60 dark:text-white/60 mb-1">Уровень сложности</p>
-                  <p className="text-2xl font-bold text-black dark:text-white">{difficulty}/5</p>
+
+                <div className="mb-6 rounded-2xl bg-black/5 p-4 dark:bg-white/5">
+                  <p className="mb-1 text-sm text-black/60 dark:text-white/60">Текущий соперник</p>
+                  <p className="text-2xl font-bold text-black dark:text-white">{activeMeta.title} · {activeMeta.elo} Elo</p>
                 </div>
-                
+
                 <div className="flex gap-3">
                   <button
                     onClick={resetGame}
-                    className="flex-1 py-3 bg-black dark:bg-white text-white dark:text-black rounded-xl font-semibold hover:opacity-90 transition-all"
+                    className="flex-1 rounded-xl bg-black py-3 font-semibold text-white transition-all hover:opacity-90 dark:bg-white dark:text-black"
                   >
                     Играть ещё
                   </button>
                   <button
                     onClick={() => navigate("/dashboard")}
-                    className="flex-1 py-3 bg-black/10 dark:bg-white/10 text-black dark:text-white rounded-xl font-semibold hover:bg-black/20 dark:hover:bg-white/20 transition-all"
+                    className="flex-1 rounded-xl bg-black/10 py-3 font-semibold text-black transition-all hover:bg-black/20 dark:bg-white/10 dark:text-white dark:hover:bg-white/20"
                   >
                     В меню
                   </button>
@@ -480,40 +542,105 @@ export function AIGame() {
         )}
       </AnimatePresence>
 
-      {/* Pawn Promotion Dialog */}
+      <AnimatePresence>
+        {isResignConfirmOpen && !gameOver && (
+          <motion.div
+            initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
+            animate={{ opacity: 1, backdropFilter: "blur(8px)" }}
+            exit={{ opacity: 0, backdropFilter: "blur(0px)" }}
+            transition={{ duration: 0.34, ease: [0.22, 1, 0.36, 1] }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/38 px-4"
+          >
+            <motion.div
+              initial={{ y: 28, scale: 0.965, opacity: 0, filter: "blur(10px)" }}
+              animate={{ y: 0, scale: 1, opacity: 1, filter: "blur(0px)" }}
+              exit={{ y: 18, scale: 0.985, opacity: 0, filter: "blur(6px)" }}
+              transition={{ duration: 0.48, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}
+              className="w-full max-w-md rounded-3xl border border-white/45 bg-white/96 p-8 shadow-[0_30px_80px_rgba(0,0,0,0.24)] backdrop-blur-xl dark:border-white/10 dark:bg-[#1a1a1a]/94"
+            >
+              <button
+                onClick={() => setIsResignConfirmOpen(false)}
+                className="absolute right-4 top-4 inline-flex h-10 w-10 items-center justify-center rounded-full border border-black/10 bg-white/80 text-black/65 transition-all hover:bg-white hover:text-black dark:border-white/10 dark:bg-white/10 dark:text-white/65 dark:hover:bg-white/15 dark:hover:text-white"
+                aria-label="Закрыть окно сдачи"
+              >
+                <X className="h-5 w-5" />
+              </button>
+              <div className="text-center">
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.85, y: 8 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  transition={{ duration: 0.42, delay: 0.18, ease: [0.22, 1, 0.36, 1] }}
+                  className="mb-4 inline-flex h-20 w-20 items-center justify-center rounded-3xl border border-rose-500/20 bg-rose-500/10 text-rose-600 dark:border-rose-400/20 dark:bg-rose-400/10 dark:text-rose-300"
+                >
+                  <X className="h-10 w-10" />
+                </motion.div>
+
+                <h2 className="mb-2 text-3xl font-bold text-black dark:text-white">
+                  Подтвердить сдачу?
+                </h2>
+
+                <p className="mb-6 text-black/60 dark:text-white/60">
+                  Партия завершится поражением. Если нажали случайно, можно вернуться и продолжить игру.
+                </p>
+
+                <div className="mb-6 rounded-2xl bg-black/5 p-4 dark:bg-white/5">
+                  <p className="mb-1 text-sm text-black/60 dark:text-white/60">Текущий соперник</p>
+                  <p className="text-2xl font-bold text-black dark:text-white">{activeMeta.title} · {activeMeta.elo} Elo</p>
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setIsResignConfirmOpen(false)}
+                    className="flex-1 rounded-xl bg-black/10 py-3 font-semibold text-black transition-all hover:bg-black/20 dark:bg-white/10 dark:text-white dark:hover:bg-white/20"
+                  >
+                    Продолжить игру
+                  </button>
+                  <button
+                    onClick={() => void resignCurrentGame()}
+                    className="flex-1 rounded-xl bg-rose-600 py-3 font-semibold text-white transition-all hover:bg-rose-700 dark:bg-rose-500 dark:hover:bg-rose-400"
+                  >
+                    Сдаться
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {promotionMove && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
           >
             <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-white dark:bg-[#1a1a1a] rounded-3xl p-8 max-w-md w-full mx-4 shadow-2xl"
+              className="mx-4 w-full max-w-md rounded-3xl bg-white p-8 shadow-2xl dark:bg-[#1a1a1a]"
             >
-              <h2 className="text-2xl font-bold mb-6 text-center text-black dark:text-white">
-                ♙ Превращение пешки
-              </h2>
-              
+              <button
+                onClick={() => setPromotionMove(null)}
+                className="absolute right-4 top-4 inline-flex h-10 w-10 items-center justify-center rounded-full border border-black/10 bg-white/80 text-black/65 transition-all hover:bg-white hover:text-black dark:border-white/10 dark:bg-white/10 dark:text-white/65 dark:hover:bg-white/15 dark:hover:text-white"
+                aria-label="Закрыть выбор превращения"
+              >
+                <X className="h-5 w-5" />
+              </button>
+              <h2 className="mb-6 text-center text-2xl font-bold text-black dark:text-white">♙ Превращение пешки</h2>
               <div className="grid grid-cols-4 gap-3">
                 {[
                   { piece: "q", name: "Ферзь", icon: "♕" },
                   { piece: "r", name: "Ладья", icon: "♖" },
                   { piece: "b", name: "Слон", icon: "♗" },
-                  { piece: "n", name: "Конь", icon: "♘" }
+                  { piece: "n", name: "Конь", icon: "♘" },
                 ].map(({ piece, name, icon }) => (
                   <button
                     key={piece}
-                    onClick={() => {
-                      if (promotionMove) {
-                        makeMove(promotionMove.from, promotionMove.to, piece);
-                      }
-                    }}
-                    className="flex flex-col items-center gap-2 p-4 rounded-xl bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 hover:bg-black/10 dark:hover:bg-white/10 transition-all hover:scale-105"
+                    onClick={() => promotionMove && void makeMove(promotionMove.from, promotionMove.to, piece)}
+                    className="flex flex-col items-center gap-2 rounded-xl border border-black/10 bg-black/5 p-4 transition-all hover:scale-105 hover:bg-black/10 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
                   >
                     <span className="text-4xl">{icon}</span>
                     <span className="text-xs font-semibold text-black/60 dark:text-white/60">{name}</span>
@@ -526,206 +653,353 @@ export function AIGame() {
       </AnimatePresence>
 
       <div className="relative z-10 min-h-screen flex flex-col">
-        {/* Header */}
         <motion.header
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="px-8 py-6 flex items-center justify-between"
+          className="flex items-center px-4 py-4 md:px-6 md:py-5 lg:px-8"
         >
-          <button
-            onClick={() => navigate("/dashboard")}
-            className="flex items-center gap-2 text-black/60 dark:text-white/60 hover:text-black dark:hover:text-white transition-colors"
-          >
-            <ArrowLeft className="w-5 h-5" />
-            <span className="text-sm tracking-wide">Главное меню</span>
-          </button>
-
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-4">
+            <BrandHomeLink />
             <button
-              onClick={undoLastMoves}
-              disabled={moveHistory.length < 2 || isAIThinking || gameOver}
-              className="w-10 h-10 rounded-xl bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 border border-black/10 dark:border-white/10 flex items-center justify-center transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Отменить последний ход"
+              onClick={() => navigate("/dashboard")}
+              className="flex items-center gap-2 text-black/60 transition-colors hover:text-black dark:text-white/60 dark:hover:text-white"
             >
-              <Undo2 className="w-4 h-4" />
-            </button>
-            <button
-              onClick={resetGame}
-              className="w-10 h-10 rounded-xl bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 border border-black/10 dark:border-white/10 flex items-center justify-center transition-all"
-              title="Новая игра"
-            >
-              <RotateCcw className="w-4 h-4" />
+              <ArrowLeft className="h-5 w-5" />
+              <span className="text-sm tracking-wide">Главное меню</span>
             </button>
           </div>
         </motion.header>
 
-        {/* Main Game Area */}
-        <div className="flex-1 flex items-center justify-center px-8 py-12">
-          <div className="w-full max-w-7xl grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-8 items-start">
-            {/* Chessboard */}
+        <div className="flex-1 px-4 py-4 md:px-6 md:py-6 lg:px-8 lg:py-8">
+          <div className="mx-auto grid max-w-6xl grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_360px] xl:items-start xl:gap-6">
             <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
+              initial={{ opacity: 0, scale: 0.97 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.6 }}
-              className="w-full max-w-[700px] mx-auto"
+              className="mx-auto w-full max-w-[680px]"
             >
-              <CustomChessboard
-                position={game.fen()}
-                onPieceDrop={onDrop}
-                onSquareClick={handlePieceClick}
-                selectedSquare={selectedSquare}
-                possibleMoves={possibleMoves}
-                checkSquare={game.isCheck() ? findKingSquare(game, game.turn()) : null}
-                checkmateSquare={game.isCheckmate() ? findKingSquare(game, game.turn()) : null}
-                boardOrientation="white"
-                disabled={isAIThinking || gameOver || game.turn() !== "w"}
-              />
+              {hasActiveGame ? (
+                <div className="space-y-3 md:space-y-4">
+                  <div className={topPlayerCardClassName}>
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-black/10 bg-[#d9d9d9] text-black/75 dark:border-white/10 dark:bg-white/10 dark:text-white/75">
+                        <Brain className="h-6 w-6" />
+                      </div>
+                      <div>
+                        <p className="text-[11px] uppercase tracking-[0.26em] text-black/45 dark:text-white/45">Opponent</p>
+                        <p className="mt-1 text-lg font-semibold text-black/85 dark:text-white/85">AI {activeMeta.title}</p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[11px] uppercase tracking-[0.22em] text-black/45 dark:text-white/45">Engine Elo</p>
+                      <p className="mt-1 text-xl md:text-2xl font-light text-black/85 dark:text-white/85">{activeMeta.elo}</p>
+                    </div>
+                  </div>
+
+                  <CustomChessboard
+                    position={game.fen()}
+                    onPieceDrop={onDrop}
+                    onSquareClick={handlePieceClick}
+                    selectedSquare={selectedSquare}
+                    possibleMoves={possibleMoves}
+                    lastMoveSquares={lastMoveSquares}
+                    checkSquare={game.isCheck() ? findKingSquare(game, game.turn()) : null}
+                    checkmateSquare={game.isCheckmate() ? findKingSquare(game, game.turn()) : null}
+                    boardOrientation={activePlayerColor}
+                    disabled={isAIThinking || gameOver || game.turn() !== playerTurn}
+                  />
+
+                  <div className={bottomPlayerCardClassName}>
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-black/10 bg-white text-black/75 dark:border-white/10 dark:bg-white/10 dark:text-white/75">
+                        <UserRound className="h-6 w-6" />
+                      </div>
+                      <div>
+                        <p className="text-[11px] uppercase tracking-[0.26em] text-black/45 dark:text-white/45">You</p>
+                        <p className="mt-1 text-lg font-semibold text-black/85 dark:text-white/85">@{currentProfile.username}</p>
+                        <p className="mt-1 text-xs md:text-sm text-black/50 dark:text-white/50">{currentProfile.playerNumber || "#--"}</p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[11px] uppercase tracking-[0.22em] text-black/45 dark:text-white/45">Your Elo</p>
+                      <p className="mt-1 text-xl md:text-2xl font-light text-black/85 dark:text-white/85">{currentProfile.rating}</p>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="relative">
+                  <CustomChessboard
+                    position="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+                    onPieceDrop={() => false}
+                    boardOrientation={selectedPlayerColor}
+                    disabled
+                  />
+                  <div className="absolute inset-0 flex items-center justify-center px-4 md:px-6">
+                      <div className="rounded-3xl border border-black/10 bg-white/80 px-6 py-5 text-center shadow-xl backdrop-blur-md dark:border-white/10 dark:bg-black/45">
+                        <Crown className="mx-auto h-8 w-8 text-black/70 dark:text-white/70" />
+                        <p className="mt-3 text-xl md:text-2xl font-light text-black/85 dark:text-white/85">Select your AI level</p>
+                        <p className="mt-2 text-xs md:text-sm text-black/50 dark:text-white/50">The board stays still until you confirm the matchup in the sidebar.</p>
+                      </div>
+                  </div>
+                </div>
+              )}
             </motion.div>
 
-            {/* Sidebar */}
             <motion.div
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ duration: 0.6, delay: 0.2 }}
-              className="space-y-6"
+              className="space-y-4 md:space-y-5"
             >
-              {/* AI Difficulty */}
-              <div className="p-6 rounded-2xl bg-black/5 dark:bg-white/5 backdrop-blur-xl border border-black/10 dark:border-white/10">
-                <h3 className="text-sm tracking-wide text-black/60 dark:text-white/60 mb-4 font-semibold">Уровень сложности IA</h3>
-                <div className="flex gap-2">
-                  {[1, 2, 3, 4, 5].map((level) => (
-                    <button
-                      key={level}
-                      onClick={() => !isAIThinking && !gameOver && setDifficulty(level)}
-                      disabled={isAIThinking || gameOver}
-                      className={`flex-1 py-2 rounded-lg text-sm transition-all font-medium ${
-                        difficulty === level
-                          ? "bg-black/20 dark:bg-white/20 text-black dark:text-white border border-black/30 dark:border-white/30"
-                          : "bg-black/5 dark:bg-white/5 text-black/40 dark:text-white/40 border border-black/10 dark:border-white/10 hover:bg-black/10 dark:hover:bg-white/10"
-                      } ${(isAIThinking || gameOver) && difficulty !== level ? "opacity-50 cursor-not-allowed" : ""}`}
-                    >
-                      {level}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              {!hasActiveGame ? (
+                <div className="rounded-[1.75rem] border border-black/10 bg-black/5 p-5 md:p-6 backdrop-blur-xl dark:border-white/10 dark:bg-white/5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.22em] text-black/40 dark:text-white/40">Play VS AI</p>
+                      <h1 className="mt-2 text-3xl md:text-4xl font-light tracking-tight">Choose Level</h1>
+                    </div>
+                    <div className={`rounded-2xl border border-black/10 bg-gradient-to-br ${selectedMeta.accent} px-4 py-3 text-right dark:border-white/10`}>
+                      <p className="text-xs uppercase tracking-[0.22em] text-black/40 dark:text-white/40">Target Elo</p>
+                      <p className="mt-2 text-2xl font-light text-black/85 dark:text-white/85">{selectedMeta.elo}</p>
+                    </div>
+                  </div>
 
-              {/* Game Status */}
-              <div className={`p-6 rounded-2xl backdrop-blur-xl border transition-all ${
-                game.isCheckmate() 
-                  ? "bg-red-500/15 border-red-500/30" 
-                  : game.isCheck() 
-                  ? "bg-yellow-500/15 border-yellow-500/30" 
-                  : isAIThinking
-                  ? "bg-blue-500/15 border-blue-500/30"
-                  : "bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10"
-              }`}>
-                <h3 className="text-sm tracking-wide text-black/60 dark:text-white/60 mb-3 font-semibold">Статус игры</h3>
-                <div className="flex items-center gap-2">
-                  {isAIThinking && (
-                    <motion.div
-                      animate={{ rotate: 360 }}
-                      transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-                      className="w-5 h-5"
-                    >
-                      <div className="w-full h-full rounded-full border-2 border-transparent border-t-blue-500 dark:border-t-blue-400" />
-                    </motion.div>
-                  )}
-                  <p className={`text-lg font-bold ${
-                    game.isCheckmate() 
-                      ? "text-red-600 dark:text-red-400" 
-                      : game.isCheck() 
-                      ? "text-yellow-600 dark:text-yellow-400" 
-                      : isAIThinking
-                      ? "text-blue-600 dark:text-blue-400"
-                      : "text-black/80 dark:text-white/80"
-                  }`}>
-                    {game.isCheckmate()
-                      ? game.turn() === "w" ? "❌ МАТ!" : "✓ Вы выиграли!"
-                      : game.isCheck()
-                      ? "⚠️ ШАХ!"
-                      : isAIThinking
-                      ? "🤖 IA размышляет..."
-                      : game.turn() === "w"
-                      ? "♔ Ваш ход"
-                      : "♚ Ход IA..."}
-                  </p>
-                </div>
-              </div>
+                  <div className="mt-5 space-y-2.5">
+                    <div className="grid grid-cols-2 gap-3">
+                      {([
+                        { value: "white", title: "Play White" },
+                        { value: "black", title: "Play Black" },
+                      ] as const).map((colorOption) => (
+                        <button
+                          key={colorOption.value}
+                          onClick={() => setSelectedPlayerColor(colorOption.value)}
+                          className={`rounded-2xl border px-4 py-3 text-left transition-all ${
+                            selectedPlayerColor === colorOption.value
+                              ? "border-black/25 bg-white/80 shadow-lg dark:border-white/25 dark:bg-white/10"
+                              : "border-black/10 bg-white/45 hover:border-black/20 hover:bg-white/70 dark:border-white/10 dark:bg-white/5 dark:hover:border-white/20 dark:hover:bg-white/10"
+                          }`}
+                        >
+                          <p className="text-sm font-medium text-black/85 dark:text-white/85">{colorOption.title}</p>
+                        </button>
+                      ))}
+                    </div>
 
-              {/* Material Count */}
-              {(() => {
-                const mat = calculateMaterial();
-                const diff = mat.white - mat.black;
-                const isWhiteAhead = diff > 0;
-                const absD = Math.abs(diff);
-                return (
-                  <div className="p-6 rounded-2xl bg-black/5 dark:bg-white/5 backdrop-blur-xl border border-black/10 dark:border-white/10">
-                    <h3 className="text-sm tracking-wide text-black/60 dark:text-white/60 mb-4 font-semibold">Материал</h3>
-                    <div className="space-y-3">
-                      <div className="flex justify-between items-center">
-                        <span className="text-sm text-black/60 dark:text-white/60">♔ Вы (белые)</span>
-                        <span className="font-semibold text-black dark:text-white">{mat.white}</span>
+                    <div className="rounded-[1.5rem] border border-black/10 bg-white/55 p-4 shadow-sm dark:border-white/10 dark:bg-white/5">
+                      <motion.div
+                        key={selectedLevel}
+                        initial={{ opacity: 0.72, y: 8, scale: 0.985 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        transition={{ duration: 0.24, ease: "easeOut" }}
+                        className={`rounded-[1.35rem] border border-black/10 bg-gradient-to-br ${selectedMeta.accent} p-4 dark:border-white/10`}
+                      >
+                        <div className="flex items-start justify-between gap-4">
+                          <div>
+                            <p className="text-[11px] uppercase tracking-[0.22em] text-black/40 dark:text-white/40">Difficulty</p>
+                            <p className="mt-2 text-lg font-medium text-black/85 dark:text-white/85">AI {selectedMeta.title}</p>
+                          </div>
+                          <div className="shrink-0 rounded-2xl border border-black/10 bg-white/55 px-3 py-2 text-right shadow-sm dark:border-white/10 dark:bg-black/20">
+                            <p className="text-[10px] uppercase tracking-[0.18em] text-black/40 dark:text-white/40">Level {selectedLevel}</p>
+                            <p className="mt-1 text-lg font-light text-black/85 dark:text-white/85">{selectedMeta.elo}</p>
+                            <p className="text-[10px] uppercase tracking-[0.18em] text-black/45 dark:text-white/45">Elo</p>
+                          </div>
+                        </div>
+                      </motion.div>
+
+                      <div className="mt-4 rounded-2xl border border-black/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.65),rgba(0,0,0,0.03))] px-4 py-4 dark:border-white/10 dark:bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.02))]">
+                        <div className="mb-3 flex items-center justify-between text-[10px] uppercase tracking-[0.22em] text-black/38 dark:text-white/38">
+                          <span>Soft</span>
+                          <span>Competitive</span>
+                          <span>Elite</span>
+                        </div>
+
+                        <Slider
+                          value={[selectedLevel]}
+                          min={1}
+                          max={stockfishLevels.length}
+                          step={1}
+                          onValueChange={(value) => setSelectedLevel(value[0] ?? DEFAULT_STOCKFISH_LEVEL)}
+                          className="w-full"
+                        />
+
+                        <div className="mt-3 grid grid-cols-[repeat(15,minmax(0,1fr))] gap-1">
+                          {stockfishLevels.map((level) => (
+                            <div
+                              key={level.level}
+                              className={`h-1.5 rounded-full transition-all ${
+                                level.level <= selectedLevel
+                                  ? "bg-black/65 dark:bg-white/70"
+                                  : "bg-black/10 dark:bg-white/10"
+                              }`}
+                            />
+                          ))}
+                        </div>
+
+                        <div className="relative mt-5 h-8">
+                          {keyDifficultyStops.map((stop) => (
+                            <div
+                              key={stop.level}
+                              className="absolute top-0 -translate-x-1/2 text-center"
+                              style={{ left: `${((stop.level - 1) / (stockfishLevels.length - 1)) * 100}%` }}
+                            >
+                              <div className={`mx-auto h-2 w-px ${stop.level <= selectedLevel ? "bg-black/55 dark:bg-white/60" : "bg-black/18 dark:bg-white/18"}`} />
+                              <span className={`mt-2 block text-[10px] uppercase tracking-[0.18em] transition-colors ${stop.level === selectedLevel ? "text-black dark:text-white" : "text-black/38 dark:text-white/38"}`}>
+                                {stop.label}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="mt-2 flex items-center justify-between text-[11px] uppercase tracking-[0.18em] text-black/40 dark:text-white/40">
+                          <span>{stockfishLevels[0]?.title}</span>
+                          <span>{selectedLevel} / {stockfishLevels.length}</span>
+                          <span>{stockfishLevels[stockfishLevels.length - 1]?.title}</span>
+                        </div>
                       </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-sm text-black/60 dark:text-white/60">♚ IA (чёрные)</span>
-                        <span className="font-semibold text-black dark:text-white">{mat.black}</span>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => void startNewGame(selectedLevel)}
+                    disabled={isStartingGame}
+                    className="mt-5 flex w-full items-center justify-center gap-3 rounded-2xl border border-black/20 bg-black px-5 py-3.5 text-sm font-medium text-white transition-all hover:opacity-90 disabled:opacity-60 dark:border-white/20 dark:bg-white dark:text-black"
+                  >
+                    <Swords className="h-4 w-4" />
+                    {isStartingGame ? "Preparing AI..." : `Start as ${selectedPlayerColor} vs AI ${selectedMeta.title}`}
+                  </button>
+                </div>
+              ) : null}
+
+              {error ? (
+                <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-600 dark:text-rose-400">
+                  {error}
+                </div>
+              ) : null}
+
+              {hasActiveGame ? (
+                <>
+                  <div className="rounded-2xl border border-black/10 bg-black/5 p-5 backdrop-blur-xl dark:border-white/10 dark:bg-white/5">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <h3 className="text-sm font-semibold tracking-wide text-black/60 dark:text-white/60">Current Opponent</h3>
+                        <p className="mt-2 text-xl md:text-2xl font-light text-black/85 dark:text-white/85">AI {activeMeta.title}</p>
                       </div>
-                      {absD > 0 && (
-                        <div className={`flex justify-between items-center pt-3 border-t border-black/10 dark:border-white/10 ${
-                          isWhiteAhead ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"
-                        }`}>
-                          <span className="text-sm font-semibold">{isWhiteAhead ? "Вы впереди" : "IA впереди"}</span>
-                          <span className="font-bold">+{absD}</span>
+                      <div className={`rounded-2xl border border-black/10 bg-gradient-to-br ${activeMeta.accent} px-4 py-3 text-right dark:border-white/10`}>
+                        <p className="text-xs uppercase tracking-[0.22em] text-black/40 dark:text-white/40">Estimated Strength</p>
+                        <p className="mt-2 text-2xl font-light text-black/85 dark:text-white/85">{activeMeta.elo}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div
+                    className={`rounded-2xl border p-5 backdrop-blur-xl transition-all ${
+                      game.isCheckmate()
+                        ? "border-red-500/30 bg-red-500/15"
+                        : game.isCheck()
+                        ? "border-yellow-500/30 bg-yellow-500/15"
+                        : isAIThinking
+                        ? "border-blue-500/30 bg-blue-500/15"
+                        : "border-black/10 bg-black/5 dark:border-white/10 dark:bg-white/5"
+                    }`}
+                  >
+                    <h3 className="mb-3 text-sm font-semibold tracking-wide text-black/60 dark:text-white/60">Game Status</h3>
+                    <p
+                      className={`text-base md:text-lg font-bold ${
+                        game.isCheckmate()
+                          ? "text-red-600 dark:text-red-400"
+                          : game.isCheck()
+                          ? "text-yellow-600 dark:text-yellow-400"
+                          : isAIThinking
+                          ? "text-blue-600 dark:text-blue-400"
+                          : "text-black/80 dark:text-white/80"
+                      }`}
+                    >
+                      {game.isCheckmate()
+                        ? game.turn() === "w"
+                          ? "❌ МАТ!"
+                          : "✓ Вы выиграли!"
+                        : game.isCheck()
+                        ? "⚠️ ШАХ!"
+                        : isAIThinking
+                        ? "🤖 AI is thinking..."
+                        : game.turn() === playerTurn
+                        ? "♔ Ваш ход"
+                        : "♚ AI to move..."}
+                    </p>
+                  </div>
+
+                  {(() => {
+                    const mat = calculateMaterial();
+                    const playerMaterial = activePlayerColor === "white" ? mat.white : mat.black;
+                    const aiMaterial = activePlayerColor === "white" ? mat.black : mat.white;
+                    const diff = playerMaterial - aiMaterial;
+                    const isPlayerAhead = diff > 0;
+                    const absDiff = Math.abs(diff);
+                    return (
+                      <div className="rounded-2xl border border-black/10 bg-black/5 p-5 backdrop-blur-xl dark:border-white/10 dark:bg-white/5">
+                        <h3 className="mb-4 text-sm font-semibold tracking-wide text-black/60 dark:text-white/60">Material</h3>
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm text-black/60 dark:text-white/60">♔ Вы ({activePlayerColor === "white" ? "белые" : "чёрные"})</span>
+                            <span className="font-semibold text-black dark:text-white">{playerMaterial}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm text-black/60 dark:text-white/60">♚ AI</span>
+                            <span className="font-semibold text-black dark:text-white">{aiMaterial}</span>
+                          </div>
+                          {absDiff > 0 ? (
+                            <div className={`flex items-center justify-between border-t border-black/10 pt-3 dark:border-white/10 ${isPlayerAhead ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                              <span className="text-sm font-semibold">{isPlayerAhead ? "You are ahead" : "AI is ahead"}</span>
+                              <span className="font-bold">+{absDiff}</span>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  <div className="rounded-2xl border border-black/10 bg-black/5 p-5 backdrop-blur-xl dark:border-white/10 dark:bg-white/5">
+                    <h3 className="mb-4 text-sm font-semibold tracking-wide text-black/60 dark:text-white/60">Match Actions</h3>
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        onClick={() => setIsResignConfirmOpen(true)}
+                        disabled={isAIThinking || gameOver}
+                        className="flex items-center justify-center gap-2 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm font-medium text-rose-700 transition-all hover:bg-rose-500/15 disabled:cursor-not-allowed disabled:opacity-40 dark:border-rose-400/20 dark:bg-rose-400/10 dark:text-rose-300 dark:hover:bg-rose-400/15"
+                        title="Сдаться"
+                      >
+                        <X className="h-4 w-4" />
+                        <span>Сдаться</span>
+                      </button>
+                      <button
+                        onClick={resetGame}
+                        className="flex items-center justify-center gap-2 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm font-medium text-emerald-700 transition-all hover:bg-emerald-500/15 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-300 dark:hover:bg-emerald-400/15"
+                        title="Новая игра"
+                      >
+                        <RotateCcw className="h-4 w-4" />
+                        <span>Заново</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-black/10 bg-black/5 p-5 backdrop-blur-xl dark:border-white/10 dark:bg-white/5">
+                    <h3 className="mb-4 text-sm font-semibold tracking-wide text-black/60 dark:text-white/60">Move History</h3>
+                    <div className="max-h-48 space-y-1 overflow-y-auto">
+                      {moveHistory.length === 0 ? (
+                        <p className="text-sm text-black/40 dark:text-white/40">Нет ходов</p>
+                      ) : (
+                        <div className="grid grid-cols-2 gap-2">
+                          {Array.from({ length: Math.ceil(moveHistory.length / 2) }).map((_, index) => (
+                            <div key={index} className="flex gap-2">
+                              <span className="w-6 text-xs text-black/40 dark:text-white/40">{index + 1}.</span>
+                              <span className="text-xs text-black/80 dark:text-white/80">{moveHistory[index * 2] || ""}</span>
+                              <span className="text-xs text-black/80 dark:text-white/80">{moveHistory[index * 2 + 1] || ""}</span>
+                            </div>
+                          ))}
                         </div>
                       )}
                     </div>
                   </div>
-                );
-              })()}
-
-              {/* Move History */}
-              <div className="p-6 rounded-2xl bg-black/5 dark:bg-white/5 backdrop-blur-xl border border-black/10 dark:border-white/10">
-                <h3 className="text-sm tracking-wide text-black/60 dark:text-white/60 mb-4 font-semibold">История ходов</h3>
-                <div className="max-h-64 overflow-y-auto space-y-1">
-                  {moveHistory.length === 0 ? (
-                    <p className="text-black/40 dark:text-white/40 text-sm">Нет ходов</p>
-                  ) : (
-                    <div className="grid grid-cols-2 gap-2">
-                      {Array.from({ length: Math.ceil(moveHistory.length / 2) }).map((_, i) => (
-                        <div key={i} className="flex gap-2">
-                          <span className="text-black/40 dark:text-white/40 text-xs w-6">{i + 1}.</span>
-                          <span className="text-black/80 dark:text-white/80 text-xs">{moveHistory[i * 2] || ""}</span>
-                          <span className="text-black/80 dark:text-white/80 text-xs">{moveHistory[i * 2 + 1] || ""}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Game Stats */}
-              <div className="p-6 rounded-2xl bg-black/5 dark:bg-white/5 backdrop-blur-xl border border-black/10 dark:border-white/10">
-                <h3 className="text-sm tracking-wide text-black/60 dark:text-white/60 mb-4 font-semibold">Статистика</h3>
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm text-black/60 dark:text-white/60">Ходы</span>
-                    <span className="font-semibold text-black dark:text-white">{moveHistory.length}</span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm text-black/60 dark:text-white/60">Сложность IA</span>
-                    <span className="font-semibold text-black dark:text-white flex items-center gap-1">
-                      <span className="text-xs">{'★'.repeat(difficulty)}{'☆'.repeat(5-difficulty)}</span>
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Game Info */}
-              <div className="p-4 rounded-2xl bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 text-sm text-black/60 dark:text-white/60">
-                <p className="mb-2">♔ Вы: белые фигуры</p>
-                <p>♚ IA: чёрные фигуры</p>
-              </div>
+                </>
+              ) : null}
             </motion.div>
           </div>
         </div>

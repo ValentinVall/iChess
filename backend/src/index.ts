@@ -1,14 +1,31 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import express from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { initializeDatabase } from './database/connection.js';
 import { initializeSchema } from './database/init.js';
 import { createWebSocketManager } from './websocket/manager.js';
-import { authMiddleware, handleSignIn, handleVerifyToken } from './auth/routes.js';
+import {
+  authMiddleware,
+  handleChangePassword,
+  handleLogin,
+  handleLogout,
+  handleRegister,
+  handleRegisterPreview,
+  handleRefreshToken,
+  handleVerifyToken,
+} from './auth/routes.js';
 import gameRoutes from './games/routes.js';
 import userRoutes from './routes/users.js';
 import type { AuthRequest } from './auth/routes.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../.env'), override: false });
 
 const app = express();
 const httpServer = createServer(app);
@@ -22,14 +39,22 @@ initializeSchema().catch(err => {
 
 // Middleware
 app.use(express.json());
-app.use(cors());
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  credentials: true,
+}));
 
 // Initialize WebSocket
 const wsManager = createWebSocketManager(httpServer);
 
 // Routes
-app.post('/api/auth/signin', handleSignIn);
+app.post('/api/auth/register', handleRegister);
+app.get('/api/auth/register-preview', handleRegisterPreview);
+app.post('/api/auth/login', handleLogin);
+app.post('/api/auth/refresh', handleRefreshToken);
+app.post('/api/auth/logout', handleLogout);
 app.get('/api/auth/verify', authMiddleware, handleVerifyToken);
+app.post('/api/auth/change-password', authMiddleware, handleChangePassword);
 
 // Protected routes
 app.use('/api/games', authMiddleware, gameRoutes);

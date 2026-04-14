@@ -5,6 +5,7 @@ import { useState, useEffect } from "react";
 import { Card } from "./ui/card";
 import { Switch } from "./ui/switch";
 import { Button } from "./ui/button";
+import { BrandHomeLink } from "./BrandHomeLink";
 
 export function Settings() {
   const navigate = useNavigate();
@@ -65,29 +66,32 @@ export function Settings() {
         <motion.header
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="px-8 py-6 flex items-center justify-between"
+          className="flex items-center justify-between px-4 py-4 md:px-6 md:py-5 lg:px-8"
         >
-          <button
-            onClick={() => navigate("/dashboard")}
-            className="flex items-center gap-2 text-black/60 dark:text-white/60 hover:text-black dark:hover:text-white transition-colors"
-          >
-            <ArrowLeft className="w-5 h-5" />
-            <span className="text-sm tracking-wide">Back</span>
-          </button>
+          <div className="flex items-center gap-4">
+            <BrandHomeLink />
+            <button
+              onClick={() => navigate("/dashboard")}
+              className="flex items-center gap-2 text-black/60 dark:text-white/60 hover:text-black dark:hover:text-white transition-colors"
+            >
+              <ArrowLeft className="w-5 h-5" />
+              <span className="text-sm tracking-wide">Back</span>
+            </button>
+          </div>
           <h1 className="text-lg font-light tracking-tight">Settings</h1>
           <div className="w-9" />
         </motion.header>
 
         {/* Main Content */}
-        <div className="max-w-3xl mx-auto px-8 py-12">
+        <div className="max-w-3xl mx-auto px-4 py-6 md:px-6 md:py-8 lg:px-8 lg:py-10">
           {/* Audio Settings */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6 }}
-            className="mb-8"
+            className="mb-6 md:mb-8"
           >
-            <Card className="bg-white/50 dark:bg-white/5 backdrop-blur-xl border border-black/10 dark:border-white/10 p-6 rounded-2xl">
+            <Card className="rounded-2xl border border-black/10 bg-white/50 p-5 backdrop-blur-xl dark:border-white/10 dark:bg-white/5 md:p-6">
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
                   {soundEnabled ? (
@@ -115,9 +119,9 @@ export function Settings() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.1 }}
-            className="mb-8"
+            className="mb-6 md:mb-8"
           >
-            <Card className="bg-white/50 dark:bg-white/5 backdrop-blur-xl border border-black/10 dark:border-white/10 p-6 rounded-2xl">
+            <Card className="rounded-2xl border border-black/10 bg-white/50 p-5 backdrop-blur-xl dark:border-white/10 dark:bg-white/5 md:p-6">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <Bell className="w-5 h-5 text-black/60 dark:text-white/60" />
@@ -141,7 +145,7 @@ export function Settings() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.2 }}
-            className="mb-8"
+            className="mb-6 md:mb-8"
           >
             <div className="mb-4">
               <h3 className="text-sm font-light tracking-wide flex items-center gap-2">
@@ -151,14 +155,14 @@ export function Settings() {
                 Choose your preferred chess piece design
               </p>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-3 md:gap-4">
               {pieceStyles.map((style) => (
                 <motion.button
                   key={style.id}
                   onClick={() => setPieceStyle(style.id)}
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
-                  className={`p-4 rounded-2xl border-2 transition-all text-left ${
+                  className={`rounded-2xl border-2 p-3.5 text-left transition-all md:p-4 ${
                     pieceStyle === style.id
                       ? "border-blue-400 bg-blue-50 dark:bg-blue-950/30"
                       : "border-black/10 dark:border-white/10 bg-white/30 dark:bg-white/5 hover:border-black/20 dark:hover:border-white/20"
@@ -178,7 +182,7 @@ export function Settings() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.3 }}
-            className="mb-8"
+            className="mb-6 md:mb-8"
           >
             <div className="mb-4">
               <h3 className="text-sm font-light tracking-wide flex items-center gap-2">
@@ -188,14 +192,14 @@ export function Settings() {
                 Select your preferred board appearance
               </p>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-3 md:gap-4">
               {themes.map((theme) => (
                 <motion.button
                   key={theme.id}
                   onClick={() => setBoardTheme(theme.id)}
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
-                  className={`p-4 rounded-2xl border-2 transition-all text-left ${
+                  className={`rounded-2xl border-2 p-3.5 text-left transition-all md:p-4 ${
                     boardTheme === theme.id
                       ? "border-blue-400 bg-blue-50 dark:bg-blue-950/30"
                       : "border-black/10 dark:border-white/10 bg-white/30 dark:bg-white/5 hover:border-black/20 dark:hover:border-white/20"
@@ -213,7 +217,7 @@ export function Settings() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.4 }}
-            className="flex gap-4 justify-center pt-8"
+            className="flex justify-center gap-4 pt-4 md:pt-6"
           >
             <Button
               onClick={() => navigate("/dashboard")}

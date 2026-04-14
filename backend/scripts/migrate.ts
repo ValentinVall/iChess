@@ -1,5 +1,12 @@
-import { schema } from '../src/database/schema.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Pool } from 'pg';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const sqlPath = path.resolve(__dirname, '../../database/001_init.sql');
+const schema = fs.readFileSync(sqlPath, 'utf8');
 
 async function migrate() {
   const pool = new Pool({

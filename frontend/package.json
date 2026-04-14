@@ -1,12 +1,15 @@
 {
   "name": "@figma/my-make-file",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "maintenance:on": "node ./scripts/set-maintenance.mjs on",
+    "maintenance:off": "node ./scripts/set-maintenance.mjs off",
+    "maintenance:status": "node ./scripts/set-maintenance.mjs status"
   },
   "dependencies": {
     "react": "^18.3.1",

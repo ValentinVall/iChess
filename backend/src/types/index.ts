@@ -2,7 +2,7 @@
 
 export interface User {
   id: string;
-  appleId: string;
+  authSubject: string;
   email?: string;
   displayName?: string;
   rating: number;
@@ -15,6 +15,10 @@ export interface Game {
   whitePlayerId: string;
   blackPlayerId?: string;
   mode: 'ai' | 'online';
+  difficulty?: number;
+  timeControlId?: string;
+  initialTimeMs?: number;
+  incrementMs?: number;
   status: 'pending' | 'active' | 'completed';
   pgn: string;
   fen: string;
@@ -30,27 +34,28 @@ export interface GameMove {
   promotion?: string;
 }
 
+export interface GameClockState {
+  initialTimeMs: number;
+  incrementMs: number;
+  whiteTimeMs: number;
+  blackTimeMs: number;
+  activeColor: 'white' | 'black';
+  lastUpdatedAt: number;
+  isRunning: boolean;
+}
+
 export interface AIMove {
   bestMove: string;
   evaluation: number;
   depth: number;
-}
-
-export interface AppleToken {
-  iss: string;
-  aud: string;
-  exp: number;
-  iat: number;
-  sub: string;
-  email: string;
-  email_verified: boolean;
-  auth_time: number;
-  nonce_supported: boolean;
+  pvRank?: number;
+  delayMs?: number;
+  skillLevel?: number;
 }
 
 export interface JWTPayload {
   userId: string;
-  appleId: string;
+  authSubject: string;
   iat: number;
   exp: number;
 }

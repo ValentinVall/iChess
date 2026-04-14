@@ -26,6 +26,7 @@ build/
 # Sensitive files
 *.pem
 private_key.pem
+backend/vendor/stockfish/stockfish*.exe
 
 # Database
 *.db
