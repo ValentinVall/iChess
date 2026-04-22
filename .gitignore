@@ -5,9 +5,7 @@ yarn-error.log
 pnpm-debug.log
 
 # Environment
-.env
-.env.local
-.env.*.local
+.env*
 
 # Build output
 dist/

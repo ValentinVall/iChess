@@ -57,6 +57,7 @@ export class ChessAI {
   private readonly executablePath: string;
   private readonly pendingCommands: PendingCommand[] = [];
   private readonly initPromise: Promise<void>;
+  private initError: Error | null = null;
   private stdoutBuffer = '';
   private latestEvaluation = 0;
   private latestDepth = 0;
@@ -65,7 +66,10 @@ export class ChessAI {
 
   constructor() {
     this.executablePath = process.env.STOCKFISH_PATH || resolveDefaultEnginePath();
-    this.initPromise = this.initialize();
+    this.initPromise = this.initialize().catch((error) => {
+      this.initError = error instanceof Error ? error : new Error(String(error));
+      console.error('Failed to initialize Stockfish:', this.initError.message);
+    });
   }
 
   private async initialize() {
@@ -310,6 +314,10 @@ export class ChessAI {
   async getBestMove(fen: string, difficulty: number = 4): Promise<AIMove> {
     await this.initPromise;
 
+    if (this.initError) {
+      throw new Error(`AI engine unavailable: ${this.initError.message}`);
+    }
+
     const level = Math.max(1, Math.min(15, difficulty));
     const profile = this.getDifficultyProfile(level);
 
@@ -337,6 +345,10 @@ export class ChessAI {
 
   async getTopMoves(fen: string, count: number = 5): Promise<AIMove[]> {
     await this.initPromise;
+
+    if (this.initError) {
+      throw new Error(`AI engine unavailable: ${this.initError.message}`);
+    }
 
     const profile = this.getDifficultyProfile(15);
     const maxCount = Math.max(1, Math.min(5, count));

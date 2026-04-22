@@ -17,6 +17,7 @@ import {
   handleRefreshToken,
   handleVerifyToken,
 } from './auth/routes.js';
+import { registerRateLimit } from './auth/rateLimit.js';
 import gameRoutes from './games/routes.js';
 import userRoutes from './routes/users.js';
 import type { AuthRequest } from './auth/routes.js';
@@ -48,7 +49,7 @@ app.use(cors({
 const wsManager = createWebSocketManager(httpServer);
 
 // Routes
-app.post('/api/auth/register', handleRegister);
+app.post('/api/auth/register', registerRateLimit, handleRegister);
 app.get('/api/auth/register-preview', handleRegisterPreview);
 app.post('/api/auth/login', handleLogin);
 app.post('/api/auth/refresh', handleRefreshToken);

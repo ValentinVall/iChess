@@ -1,6 +1,6 @@
 {
   "name": "ichess-backend",
-  "version": "1.0.0",
+  "version": "0.3.1",
   "description": "Premium chess platform backend - Apple ecosystem exclusive",
   "type": "module",
   "main": "dist/index.js",
