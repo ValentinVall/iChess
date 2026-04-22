@@ -56,6 +56,14 @@ cleanup.py
 cleanup_all.py
 setup.bat
 setup.sh
+check-status.bat
+docker-setup.bat
+docker-setup.sh
+maintenance-on.bat
+maintenance-off.bat
+maintenance-status.bat
+frontend/scripts/set-maintenance.mjs
+frontend/public/maintenance.json
 
 # Archived folders
 .archive/
